@@ -12,18 +12,8 @@ from constants import BASE_DIR, EXPECTED_STATUS, MAIN_DOC_URL, MAIN_PEP_URL
 from outputs import control_output
 from utils import get_response, find_tag
 
-# session = requests_cache.CachedSession()
 
-
-def unexpected_status(url, current_status, expected_status):
-    logging.info(
-        f'Несовпадающие статусы: {url}\n'
-        f'Статус в карточке: {current_status}\n'
-        f'Ожидаемые статусы: {expected_status}'
-    )
-
-
-def p3_whats_new(session):
+def whats_new(session):
     whats_new_url = urljoin(MAIN_DOC_URL, 'whatsnew/')
     response = get_response(session, whats_new_url)
     soup = BeautifulSoup(response.text, features='lxml')
@@ -51,7 +41,7 @@ def p3_whats_new(session):
     return results
 
 
-def p3_latest_versions(session):
+def latest_versions(session):
     response = get_response(session, MAIN_DOC_URL)
     if response is None:
         return
@@ -81,7 +71,7 @@ def p3_latest_versions(session):
     return results
 
 
-def p3_docs_download(session):
+def download(session):
     downloads_url = urljoin(MAIN_DOC_URL, 'download.html')
     response = get_response(session, downloads_url)
     if response is None:
@@ -108,7 +98,7 @@ def p3_docs_download(session):
     logging.info(f'Архив был загружен и сохранён: {archive_path}')
 
 
-def pep8_accounting(session):
+def pep(session):
     response = get_response(session, MAIN_PEP_URL)
     if response is None:
         return
@@ -117,20 +107,57 @@ def pep8_accounting(session):
     table_body = find_tag(table_by_numerical, 'tbody')
     table_entries = table_body.find_all('tr')
 
-    results = [('Статус', 'Количество')]
-    # for entry in tqdm(table_entries):
-    #     entry_status = find_tag(entry, 'td').text
-    results.append((find_tag(find_tag(table_body, 'tr'), 'td').text, 1))
+    results = []
+    pep8_counter = {}
+    for entry in tqdm(table_entries):
+        preview_status = find_tag(entry, 'td').text[1:]
+        real_status = ''
+        entry_url = urljoin(MAIN_PEP_URL, find_tag(entry, 'a')['href'])
+
+        entry_response = get_response(session, entry_url)
+        if entry_response is None:
+            continue
+        entry_soup = BeautifulSoup(entry_response.text, features='lxml')
+        dl_tag = find_tag(entry_soup, 'dl')
+
+        # Не могу понять, по какой причине не работает такая запись:
+        # dt_status = dl_tag.find('dt', string=re.compile('Status'))
+        # в документации 'beautiful-soup' описано, что по такому запросу
+        # должен возвращаться объект тега, а возвращает None
+        # real_status = dt_status.find_next_sibling('dd').string
+
+        dt_tags = dl_tag.find_all('dt')
+        for dt in dt_tags:
+            if dt.text == 'Status:':
+                real_status = dt.find_next_sibling('dd').string
+                break
+
+        if real_status not in pep8_counter:
+            pep8_counter[real_status] = 1
+        else:
+            pep8_counter[real_status] += 1
+
+        if real_status not in EXPECTED_STATUS[preview_status]:
+            logging.info(
+                f'\nРазличия в статусе для документа:\n{entry_url}\n'
+                f'В индивидуальном документе прописан статус: {real_status}\n'
+                f'Ожидаемые статусы: {EXPECTED_STATUS[preview_status]}'
+            )
+
+    for status, quantity in pep8_counter.items():
+        results.append((str(status), quantity))
+        # поскольку status имеет тип BeautifulSoup "NavigableString",
+        # то без конвертации в "str", вызывает рекурсию в работе PrettyTable
     results.append(('Total', len(table_entries)))
 
-    return results
+    return [('Статус', 'Количество')] + results
 
 
 MODE_TO_FUNCTION = {
-    'whats-new': p3_whats_new,
-    'latest-versions': p3_latest_versions,
-    'download': p3_docs_download,
-    'count-pep': pep8_accounting
+    'whats-new': whats_new,
+    'latest-versions': latest_versions,
+    'download': download,
+    'pep': pep
 }
 
 
@@ -140,15 +167,12 @@ def main():
 
     arg_parser = configure_argument_parser(MODE_TO_FUNCTION.keys())
     args = arg_parser.parse_args()
-    # Логируем переданные аргументы командной строки.
     logging.info(f'Аргументы командной строки: {args}')
 
     session = requests_cache.CachedSession()
     if args.clear_cache:
-        # Очистка кеша.
         session.cache.clear()
 
-    # Получение из аргументов командной строки нужного режима работы.
     parser_mode = args.mode
     results = MODE_TO_FUNCTION[parser_mode](session)
 

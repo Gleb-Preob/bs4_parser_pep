@@ -29,7 +29,7 @@ def pretty_output(results):
     table.field_names = results[0]
     table.align = 'l'
     table.add_rows(results[1:])
-    print(table)
+    print(table.get_string())
 
 
 def file_output(results, cli_args):
@@ -38,7 +38,8 @@ def file_output(results, cli_args):
     results_dir.mkdir(exist_ok=True)
 
     parser_mode = cli_args.mode
-    now_formatted = dt.datetime.now().strftime(DT_FORMAT)
+    now = dt.datetime.now()
+    now_formatted = now.strftime(DT_FORMAT)
     file_name = f'{parser_mode}_{now_formatted}.csv'
     file_path = results_dir / file_name
 
