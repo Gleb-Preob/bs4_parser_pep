@@ -1,7 +1,11 @@
 from pathlib import Path
 
-
 BASE_DIR = Path(__file__).parent
+RESULTS_DIR = BASE_DIR / 'results'
+DOWNLOAD_DIR = BASE_DIR / 'downloads'
+LOG_DIR = BASE_DIR / 'logs'
+LOG_FILE = LOG_DIR / 'parser.log'
+
 MAIN_DOC_URL = 'https://docs.python.org/3/'
 MAIN_PEP_URL = 'https://peps.python.org/'
 

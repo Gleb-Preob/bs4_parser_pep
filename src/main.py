@@ -1,24 +1,23 @@
-# main.py
+import logging
 import re
 from urllib.parse import urljoin
 
 import requests_cache
-from bs4 import BeautifulSoup
+from requests import RequestException
 from tqdm import tqdm
-import logging
 
 from configs import configure_argument_parser, configure_logging
-from constants import BASE_DIR, EXPECTED_STATUS, MAIN_DOC_URL, MAIN_PEP_URL
+from constants import (DOWNLOAD_DIR, EXPECTED_STATUS, MAIN_DOC_URL,
+                       MAIN_PEP_URL)
+from exceptions import EmptyResponseException, ParserFindTagException
 from outputs import control_output
-from utils import get_response, find_tag
+from utils import find_tag, make_soup
 
 
 def whats_new(session):
     whats_new_url = urljoin(MAIN_DOC_URL, 'whatsnew/')
-    response = get_response(session, whats_new_url)
-    soup = BeautifulSoup(response.text, features='lxml')
-    if response is None:
-        return
+
+    soup = make_soup(session, whats_new_url)
 
     main_div = find_tag(soup, 'section', attrs={'id': 'what-s-new-in-python'})
     div_with_ul = find_tag(main_div, 'div', attrs={'class': 'toctree-wrapper'})
@@ -26,26 +25,29 @@ def whats_new(session):
         'li', attrs={'class': 'toctree-l1'}
     )
     results = [('Ссылка на статью', 'Заголовок', 'Редактор, автор')]
-
+    exception_info = []
     for section in tqdm(sections_by_python):
         version_link = urljoin(whats_new_url, section.find('a')['href'])
-        response = get_response(session, version_link)
-        if response is None:
+
+        try:
+            soup = make_soup(session, version_link)
+        except EmptyResponseException as e:
+            exception_info.append(e)
             continue
 
-        soup = BeautifulSoup(response.text, features='lxml')
         h1 = find_tag(soup, 'h1')
         dl = find_tag(soup, 'dl')
         dl_text = dl.text.replace('\n', ' ')
         results.append((version_link, h1.text, dl_text))
+
+    if exception_info:
+        logging.exception(*exception_info, stack_info=True)
     return results
 
 
 def latest_versions(session):
-    response = get_response(session, MAIN_DOC_URL)
-    if response is None:
-        return
-    soup = BeautifulSoup(response.text, features='lxml')
+    soup = make_soup(session, MAIN_DOC_URL)
+
     sidebar = find_tag(soup, 'div', attrs={'class': 'sphinxsidebarwrapper'})
     ul_tags = sidebar.find_all('ul')
 
@@ -54,7 +56,7 @@ def latest_versions(session):
             a_tags = ul.find_all('a')
             break
         else:
-            raise Exception('Ничего не нашлось')
+            raise ParserFindTagException('В списке не найдено тэгов "a"')
 
     results = [('Ссылка на документацию', 'Версия', 'Статус')]
     pattern = r'Python (?P<version>\d\.\d+) \((?P<status>.*)\)'
@@ -73,10 +75,8 @@ def latest_versions(session):
 
 def download(session):
     downloads_url = urljoin(MAIN_DOC_URL, 'download.html')
-    response = get_response(session, downloads_url)
-    if response is None:
-        return
-    soup = BeautifulSoup(response.text, features='lxml')
+
+    soup = make_soup(session, downloads_url)
 
     # container_tag= soup.find('div', {'class': 'responsive-table__container'})
     # table_tag = main_tag.find('table', {'class': 'docutils'})
@@ -87,9 +87,8 @@ def download(session):
     pdf_a4_link = pdf_a4_tag['href']
     archive_url = urljoin(downloads_url, pdf_a4_link)
     filename = archive_url.split('/')[-1]
-    downloads_dir = BASE_DIR / 'downloads'
-    downloads_dir.mkdir(exist_ok=True)
-    archive_path = downloads_dir / filename
+    DOWNLOAD_DIR.mkdir(exist_ok=True)
+    archive_path = DOWNLOAD_DIR / filename
 
     response = session.get(archive_url)
     with open(archive_path, 'wb') as file:
@@ -99,25 +98,28 @@ def download(session):
 
 
 def pep(session):
-    response = get_response(session, MAIN_PEP_URL)
-    if response is None:
-        return
-    soup = BeautifulSoup(response.text, features='lxml')
+
+    soup = make_soup(session, MAIN_PEP_URL)
+
     table_by_numerical = find_tag(soup, 'section', {'id': 'numerical-index'})
     table_body = find_tag(table_by_numerical, 'tbody')
     table_entries = table_body.find_all('tr')
 
     results = []
+    discrepancy_info = []
     pep8_counter = {}
     for entry in tqdm(table_entries):
         preview_status = find_tag(entry, 'td').text[1:]
         real_status = ''
+        exception_info = []
         entry_url = urljoin(MAIN_PEP_URL, find_tag(entry, 'a')['href'])
 
-        entry_response = get_response(session, entry_url)
-        if entry_response is None:
+        try:
+            entry_soup = make_soup(session, entry_url)
+        except EmptyResponseException as e:
+            exception_info.append(e)
             continue
-        entry_soup = BeautifulSoup(entry_response.text, features='lxml')
+
         dl_tag = find_tag(entry_soup, 'dl')
 
         # Не могу понять, по какой причине не работает такая запись:
@@ -129,25 +131,22 @@ def pep(session):
         dt_tags = dl_tag.find_all('dt')
         for dt in dt_tags:
             if dt.text == 'Status:':
-                real_status = dt.find_next_sibling('dd').string
+                real_status = str(dt.find_next_sibling('dd').string)
                 break
 
-        if real_status not in pep8_counter:
-            pep8_counter[real_status] = 1
-        else:
-            pep8_counter[real_status] += 1
-
+        pep8_counter[real_status] = pep8_counter.get(real_status, 0) + 1
         if real_status not in EXPECTED_STATUS[preview_status]:
-            logging.info(
-                f'\nРазличия в статусе для документа:\n{entry_url}\n'
-                f'В индивидуальном документе прописан статус: {real_status}\n'
-                f'Ожидаемые статусы: {EXPECTED_STATUS[preview_status]}'
+            discrepancy_info.append(
+                f'\nРазличия в статусе для документа:\n{entry_url}\nВ '
+                f'индивидуальном документе прописан статус: {real_status}'
+                f'\nОжидаемые статусы: {EXPECTED_STATUS[preview_status]}'
             )
+    if exception_info:
+        logging.exception(*exception_info, stack_info=True)
+    if discrepancy_info:
+        logging.info(*discrepancy_info)
 
-    for status, quantity in pep8_counter.items():
-        results.append((str(status), quantity))
-        # поскольку status имеет тип BeautifulSoup "NavigableString",
-        # то без конвертации в "str", вызывает рекурсию в работе PrettyTable
+    results.extend(pep8_counter.items())
     results.append(('Total', len(table_entries)))
 
     return [('Статус', 'Количество')] + results
@@ -165,19 +164,31 @@ def main():
     configure_logging()
     logging.info('Парсер запущен!')
 
-    arg_parser = configure_argument_parser(MODE_TO_FUNCTION.keys())
-    args = arg_parser.parse_args()
-    logging.info(f'Аргументы командной строки: {args}')
+    try:
+        arg_parser = configure_argument_parser(MODE_TO_FUNCTION.keys())
+        args = arg_parser.parse_args()
+        logging.info(f'Аргументы командной строки: {args}')
 
-    session = requests_cache.CachedSession()
-    if args.clear_cache:
-        session.cache.clear()
+        session = requests_cache.CachedSession()
+        if args.clear_cache:
+            session.cache.clear()
 
-    parser_mode = args.mode
-    results = MODE_TO_FUNCTION[parser_mode](session)
+        parser_mode = args.mode
+        results = MODE_TO_FUNCTION[parser_mode](session)
 
-    if results is not None:
-        control_output(results, args)
+        if results is not None:
+            control_output(args.output)(results, args)
+
+    except RequestException as e:
+        logging.exception(
+            e,
+            stack_info=True
+        )
+    except Exception as e:
+        logging.exception(
+            f'Возникла ошибка: {e}',
+            stack_info=True
+        )
 
     logging.info('Парсер завершил работу.')
 
