@@ -7,8 +7,7 @@ from requests import RequestException
 from tqdm import tqdm
 
 from configs import configure_argument_parser, configure_logging
-from constants import (DOWNLOAD_DIR, EXPECTED_STATUS, MAIN_DOC_URL,
-                       MAIN_PEP_URL)
+from constants import BASE_DIR, EXPECTED_STATUS, MAIN_DOC_URL, MAIN_PEP_URL
 from exceptions import EmptyResponseException, ParserFindTagException
 from outputs import control_output
 from utils import find_tag, make_soup
@@ -87,8 +86,10 @@ def download(session):
     pdf_a4_link = pdf_a4_tag['href']
     archive_url = urljoin(downloads_url, pdf_a4_link)
     filename = archive_url.split('/')[-1]
-    DOWNLOAD_DIR.mkdir(exist_ok=True)
-    archive_path = DOWNLOAD_DIR / filename
+    # тесты требуют создавать переменную с путём download_dir здесь
+    download_dir = BASE_DIR / 'downloads'
+    download_dir.mkdir(exist_ok=True)
+    archive_path = download_dir / filename
 
     response = session.get(archive_url)
     with open(archive_path, 'wb') as file:
@@ -177,7 +178,7 @@ def main():
         results = MODE_TO_FUNCTION[parser_mode](session)
 
         if results is not None:
-            control_output(args.output)(results, args)
+            control_output(results, args)
 
     except RequestException as e:
         logging.exception(
